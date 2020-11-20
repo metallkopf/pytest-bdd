@@ -6,25 +6,11 @@ from collections import OrderedDict
 
 import six
 
-from . import types, exceptions
+from . import types, exceptions, localization
 
 SPLIT_LINE_RE = re.compile(r"(?<!\\)\|")
 COMMENT_RE = re.compile(r"(^|(?<=\s))#")
-STEP_PREFIXES = [
-    ("Feature: ", types.FEATURE),
-    ("Scenario Outline: ", types.SCENARIO_OUTLINE),
-    ("Examples: Vertical", types.EXAMPLES_VERTICAL),
-    ("Examples:", types.EXAMPLES),
-    ("Scenario: ", types.SCENARIO),
-    ("Background:", types.BACKGROUND),
-    ("Given ", types.GIVEN),
-    ("When ", types.WHEN),
-    ("Then ", types.THEN),
-    ("@", types.TAG),
-    # Continuation of the previously mentioned step type
-    ("And ", None),
-    ("But ", None),
-]
+LANGUAGE_RE = re.compile(r"#\s?language\s?:\s?([a-z]{2}(-[a-zA-Z]+)?)")
 
 
 def split_line(line):
@@ -37,14 +23,14 @@ def split_line(line):
     return [cell.replace("\\|", "|").strip() for cell in SPLIT_LINE_RE.split(line[1:-1])]
 
 
-def parse_line(line):
+def parse_line(line, lang):
     """Parse step line to get the step prefix (Scenario, Given, When, Then or And) and the actual step name.
 
     :param line: Line of the Feature file.
 
     :return: `tuple` in form ("<prefix>", "<Line without the prefix>").
     """
-    for prefix, _ in STEP_PREFIXES:
+    for prefix, _ in localization.STEP_PREFIXES[lang]:
         if line.startswith(prefix):
             return prefix.strip(), line[len(prefix) :].strip()
     return "", line
@@ -63,14 +49,14 @@ def strip_comments(line):
     return line.strip()
 
 
-def get_step_type(line):
+def get_step_type(line, lang):
     """Detect step type by the beginning of the line.
 
     :param str line: Line of the Feature file.
 
     :return: SCENARIO, GIVEN, WHEN, THEN, or `None` if can't be detected.
     """
-    for prefix, _type in STEP_PREFIXES:
+    for prefix, _type in localization.STEP_PREFIXES[lang]:
         if line.startswith(prefix):
             return _type
 
@@ -102,12 +88,22 @@ def parse_feature(basedir, filename, encoding="utf-8"):
     step = None
     multiline_step = False
     prev_line = None
+    lang = "en"
 
     with io.open(abs_filename, "rt", encoding=encoding) as f:
         content = f.read()
 
     for line_number, line in enumerate(content.splitlines(), start=1):
         unindented_line = line.lstrip()
+        if line_number == 1:
+            match = LANGUAGE_RE.match(unindented_line)
+            if match:
+                lang = match.group(1)
+                if lang not in localization.STEP_PREFIXES:
+                    raise exceptions.FeatureError(
+                        "Localization language not supported", line_number, clean_line, filename
+                    )
+                continue
         line_indent = len(line) - len(unindented_line)
         if step and (step.indent < line_indent or ((not unindented_line) and multiline_step)):
             multiline_step = True
@@ -121,7 +117,7 @@ def parse_feature(basedir, filename, encoding="utf-8"):
         clean_line = strip_comments(line)
         if not clean_line and (not prev_mode or prev_mode not in types.FEATURE):
             continue
-        mode = get_step_type(clean_line) or mode
+        mode = get_step_type(clean_line, lang) or mode
 
         allowed_prev_mode = (types.BACKGROUND, types.GIVEN, types.WHEN)
 
@@ -132,7 +128,7 @@ def parse_feature(basedir, filename, encoding="utf-8"):
 
         if mode == types.FEATURE:
             if prev_mode is None or prev_mode == types.TAG:
-                _, feature.name = parse_line(clean_line)
+                _, feature.name = parse_line(clean_line, lang)
                 feature.line_number = line_number
                 feature.tags = get_tags(prev_line)
             elif prev_mode == types.FEATURE:
@@ -148,7 +144,7 @@ def parse_feature(basedir, filename, encoding="utf-8"):
         prev_mode = mode
 
         # Remove Feature, Given, When, Then, And
-        keyword, parsed_line = parse_line(clean_line)
+        keyword, parsed_line = parse_line(clean_line, lang)
         if mode in [types.SCENARIO, types.SCENARIO_OUTLINE]:
             tags = get_tags(prev_line)
             feature.scenarios[parsed_line] = scenario = Scenario(feature, parsed_line, line_number, tags=tags)
